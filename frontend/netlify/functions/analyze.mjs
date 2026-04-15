@@ -1,5 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
+import dotenv from "dotenv";
+import { resolve } from "node:path";
 import sharp from "sharp";
+
+dotenv.config({ path: resolve(process.cwd(), ".env") });
+dotenv.config({ path: resolve(process.cwd(), "frontend", ".env") });
+dotenv.config({ path: resolve(process.cwd(), "..", ".env") });
 
 const SYSTEM_PROMPT = `
 You are an expert automotive damage assessor working from a single inspection photo.
@@ -52,12 +58,15 @@ export async function handler(event) {
     return jsonResponse(405, { detail: "Method not allowed." });
   }
 
+  let stage = "initializing";
   try {
+    stage = "checking configuration";
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) {
-      return jsonResponse(500, { detail: "Inspection service is not configured." });
+      return jsonResponse(503, { detail: "Inspection service is not configured." });
     }
 
+    stage = "reading uploaded image";
     const body = JSON.parse(event.body || "{}");
     const image = parseDataUrl(body.image);
     if (!image) {
@@ -69,6 +78,7 @@ export async function handler(event) {
       return jsonResponse(413, { detail: "Image is too large. Use an image under 4MB." });
     }
 
+    stage = "calling inspection model";
     const ai = new GoogleGenAI({ apiKey });
     const model = process.env.GEMMA_MODEL_ID || "gemma-4-26b-a4b-it";
     const response = await ai.models.generateContent({
@@ -89,7 +99,9 @@ export async function handler(event) {
       }
     });
 
+    stage = "parsing inspection result";
     const analysis = normalizePayload(parseModelJson(response.text || ""));
+    stage = "annotating image";
     const annotated = await annotateImage(imageBuffer, image.mimeType, analysis.damages);
 
     return jsonResponse(200, {
@@ -99,9 +111,29 @@ export async function handler(event) {
       annotated_image_data_url: annotated
     });
   } catch (error) {
-    console.error(error);
-    return jsonResponse(500, { detail: "Inspection failed. Please try another vehicle photo." });
+    console.error(`[analyze] Failed while ${stage}:`, error);
+    return jsonResponse(500, { detail: publicErrorMessage(stage, error) });
   }
+}
+
+function publicErrorMessage(stage, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (stage === "calling inspection model") {
+    if (/api key|permission|unauthenticated|forbidden|quota|billing/i.test(message)) {
+      return "Inspection service could not authenticate or is not enabled for this API key.";
+    }
+    if (/not found|model|unsupported/i.test(message)) {
+      return "The configured inspection model is not available for this API key.";
+    }
+    return "The inspection model request failed. Check the Netlify terminal logs for details.";
+  }
+  if (stage === "parsing inspection result") {
+    return "The inspection service returned an unexpected result. Try another image or retry.";
+  }
+  if (stage === "annotating image") {
+    return "The inspection completed, but image annotation failed.";
+  }
+  return "Inspection failed. Please try another vehicle photo.";
 }
 
 function parseDataUrl(value) {

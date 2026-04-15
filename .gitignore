@@ -11,3 +11,7 @@ frontend/dist/
 *.pyc
 *.pyo
 *.pyd
+
+# Local Netlify folder
+.netlify
+frontend/.netlify/

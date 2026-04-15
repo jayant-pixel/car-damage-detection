@@ -24,8 +24,6 @@ frontend/
   netlify/functions/analyze.mjs
   package.json
 netlify.toml
-app/
-  FastAPI implementation kept for optional local/full-stack Python use
 ```
 
 ## Netlify Setup
@@ -64,29 +62,38 @@ cd frontend
 npm install
 ```
 
-Create a local frontend env file if needed:
+Create a local env file in the repo root:
 
 ```powershell
-Copy-Item .env.example .env
+cd ..
+notepad .env
 ```
 
-Run the Vite UI only:
+Add:
+
+```env
+GOOGLE_API_KEY=your_google_ai_api_key
+GEMMA_MODEL_ID=gemma-4-26b-a4b-it
+```
+
+Run the full Netlify local environment from the repo root:
 
 ```powershell
-npm run dev
+npx netlify-cli dev
 ```
 
-For local testing of Netlify Functions, install and use Netlify CLI:
-
-```powershell
-npm install -g netlify-cli
-netlify dev
-```
-
-Then open:
+Open only this URL:
 
 ```text
 http://localhost:8888
+```
+
+Do not use the Vite-only URL for image analysis. Plain Vite does not run Netlify Functions.
+
+If you want the local command from inside `frontend/`, run:
+
+```powershell
+npm run dev
 ```
 
 ## User-Facing Behavior
