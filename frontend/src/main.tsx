@@ -108,7 +108,7 @@ function App() {
             <h1>Upload a car photo. Get marked damage zones and a clear report.</h1>
             <p className="hero-copy">
               Inspect exterior vehicle damage from a photo, highlight the visible impact areas,
-              and summarize affected parts without exposing internal model or API details.
+              and summarize affected parts.
             </p>
           </div>
           <div className="status-card">
@@ -135,11 +135,21 @@ function App() {
               selectFile(event.dataTransfer.files[0]);
             }}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            role="button"
+            tabIndex={0}
           >
             <input
               ref={fileInputRef}
               type="file"
               accept="image/*"
+              aria-label="Upload vehicle damage photo"
+              title="Upload vehicle damage photo"
               onChange={(event) => selectFile(event.target.files?.[0])}
             />
             <div className="upload-icon">+</div>
