@@ -6,9 +6,18 @@ type Damage = {
   label: string;
   damage_type: string;
   part: string;
+  part_confidence: number;
   severity: "minor" | "moderate" | "severe";
   confidence: number;
   evidence: string;
+  dent_depth?: "shallow" | "moderate" | "deep" | "unknown";
+  measurement: {
+    width_px: number;
+    height_px: number;
+    width_percent_of_image: number;
+    height_percent_of_image: number;
+    note: string;
+  };
 };
 
 type AnalysisResponse = {
@@ -232,9 +241,14 @@ function Report({ result }: { result: AnalysisResponse | null }) {
                 <h3>{damage.label}</h3>
                 <p>{damage.evidence || "Visible exterior damage was identified in this area."}</p>
                 <div className="damage-meta">
-                  <span>{damage.part}</span>
+                  <span>Affected part: {formatPartName(damage.part)}</span>
                   <span>{formatDamageType(damage.damage_type)}</span>
                   <span className={`severity ${damage.severity}`}>{damage.severity}</span>
+                  <span>Part confidence: {formatConfidence(damage.part_confidence)}</span>
+                  <span>Damage confidence: {formatConfidence(damage.confidence)}</span>
+                  {damage.damage_type === "dent" && damage.dent_depth && (
+                    <span>Dent depth: {damage.dent_depth}</span>
+                  )}
                 </div>
               </div>
             </article>
@@ -247,6 +261,14 @@ function Report({ result }: { result: AnalysisResponse | null }) {
 
 function formatDamageType(value: string) {
   return value.replaceAll("_", " ");
+}
+
+function formatPartName(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function formatConfidence(value: number) {
+  return `${Math.round(value * 100)}%`;
 }
 
 function fileToDataUrl(file: File): Promise<string> {

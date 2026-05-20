@@ -17,9 +17,11 @@ Return exactly one JSON object using this schema:
     {
       "label": "short human readable label",
       "damage_type": "scratch|dent|crack|paint_damage|bumper_damage|glass_damage|light_damage|panel_deformation|missing_part|other",
-      "part": "specific car part",
+      "part": "specific damaged car part, for example front bumper, left door, hood, rear quarter panel",
+      "part_confidence": 0.0,
       "severity": "minor|moderate|severe",
       "confidence": 0.0,
+      "dent_depth": "shallow|moderate|deep|unknown",
       "box_1000": {
         "left": 0,
         "top": 0,
@@ -38,14 +40,18 @@ Rules:
 - Include at most 8 damage regions.
 - If no obvious damage is visible, return an empty damages array.
 - Keep labels short and practical.
-- Confidence must be between 0.0 and 1.0.
+- For every damage, name only the damaged part, not every visible vehicle part.
+- Use dent_depth only for dents. Use "unknown" if depth cannot be judged from the photo.
+- Confidence and part_confidence must be between 0.0 and 1.0.
 `.trim();
 
 const USER_PROMPT = `
 Inspect this car image and identify visible exterior damage locations.
-Focus on exact damaged region, damage type, affected part, severity, and short evidence text.
+Focus on exact damaged region, damage type, affected part name, part confidence, severity, dent depth when relevant, and short evidence text.
 Respond with valid JSON only.
 `.trim();
+
+const MEASUREMENT_NOTE = "Approximate from image; no physical scale provided.";
 
 const SEVERITY_COLORS = {
   minor: "#25745f",
@@ -95,7 +101,7 @@ export async function handler(event) {
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0,
-        maxOutputTokens: 700
+        maxOutputTokens: 900
       }
     });
 
@@ -106,9 +112,9 @@ export async function handler(event) {
 
     return jsonResponse(200, {
       summary: analysis.summary,
-      damages: analysis.damages.map(({ box_1000, ...publicDamage }) => publicDamage),
+      damages: analysis.damages.map((damage) => toPublicDamage(damage, annotated.width, annotated.height)),
       original_image_data_url: `data:${image.mimeType};base64,${image.base64}`,
-      annotated_image_data_url: annotated
+      annotated_image_data_url: annotated.dataUrl
     });
   } catch (error) {
     console.error(`[analyze] Failed while ${stage}:`, error);
@@ -171,19 +177,23 @@ function normalizeDamage(rawDamage) {
   const box = normalizeBox(rawDamage.box_1000 || rawDamage.box);
   if (!box) return null;
 
-  const severity = ["minor", "moderate", "severe"].includes(String(rawDamage.severity).toLowerCase())
-    ? String(rawDamage.severity).toLowerCase()
+  const rawSeverity = String(rawDamage.severity || "").trim().toLowerCase();
+  const severity = ["minor", "moderate", "severe"].includes(rawSeverity)
+    ? rawSeverity
     : "moderate";
-  const damageType = String(rawDamage.damage_type || "other").toLowerCase();
+  const damageType = String(rawDamage.damage_type || "other").trim().toLowerCase();
   const part = String(rawDamage.part || "unknown part").trim();
   const label = String(rawDamage.label || `${part} ${damageType}`).trim();
+  const dentDepth = normalizeDentDepth(rawDamage.dent_depth, damageType);
 
   return {
     label,
     damage_type: damageType,
     part,
+    part_confidence: clampNumber(rawDamage.part_confidence, 0, 1, clampNumber(rawDamage.confidence, 0, 1, 0.5)),
     severity,
     confidence: clampNumber(rawDamage.confidence, 0, 1, 0.5),
+    dent_depth: dentDepth,
     evidence: String(rawDamage.evidence || "").trim(),
     box_1000: box
   };
@@ -210,10 +220,15 @@ async function annotateImage(imageBuffer, mimeType, damages) {
     .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
     .jpeg({ quality: 92 })
     .toBuffer();
-  return `data:image/jpeg;base64,${output.toString("base64")}`;
+  return {
+    dataUrl: `data:image/jpeg;base64,${output.toString("base64")}`,
+    width,
+    height
+  };
 }
 
 function buildOverlaySvg(width, height, damages) {
+  const placedLabels = [];
   const items = damages.map((damage, index) => {
     const box = damage.box_1000;
     const left = Math.round((box.left / 1000) * width);
@@ -223,17 +238,22 @@ function buildOverlaySvg(width, height, damages) {
     const boxWidth = Math.max(8, right - left);
     const boxHeight = Math.max(8, bottom - top);
     const color = SEVERITY_COLORS[damage.severity] || SEVERITY_COLORS.moderate;
-    const label = `${index + 1}. ${damage.label}`;
-    const labelWidth = Math.min(width - left - 6, Math.max(120, label.length * 8 + 20));
-    const labelY = Math.max(4, top - 34);
+    const label = String(index + 1);
+    const labelBox = placeLabelBox({
+      imageWidth: width,
+      imageHeight: height,
+      damageBox: { left, top, right, bottom },
+      placedLabels
+    });
+    placedLabels.push(labelBox);
 
     return `
       <rect x="${left}" y="${top}" width="${boxWidth}" height="${boxHeight}" rx="10" ry="10"
         fill="none" stroke="${color}" stroke-width="5" />
-      <rect x="${left}" y="${labelY}" width="${labelWidth}" height="28" rx="8" ry="8"
+      <rect x="${labelBox.left}" y="${labelBox.top}" width="${labelBox.width}" height="${labelBox.height}" rx="9" ry="9"
         fill="${color}" opacity="0.94" />
-      <text x="${left + 10}" y="${labelY + 19}" fill="white"
-        font-size="15" font-family="Arial, sans-serif" font-weight="700">${escapeXml(label)}</text>
+      <text x="${labelBox.left + labelBox.width / 2}" y="${labelBox.top + 21}" fill="white"
+        font-size="17" font-family="Arial, sans-serif" font-weight="700" text-anchor="middle">${escapeXml(label)}</text>
     `;
   }).join("");
 
@@ -242,6 +262,97 @@ function buildOverlaySvg(width, height, damages) {
       ${items}
     </svg>
   `;
+}
+
+function placeLabelBox({ imageWidth, imageHeight, damageBox, placedLabels }) {
+  const badgeWidth = 38;
+  const badgeHeight = 32;
+  const gap = 7;
+  const candidates = labelCandidates(damageBox, badgeWidth, badgeHeight, gap)
+    .map((candidate) => ({
+      left: clampInt(candidate.left, 4, Math.max(4, imageWidth - badgeWidth - 4), 4),
+      top: clampInt(candidate.top, 4, Math.max(4, imageHeight - badgeHeight - 4), 4),
+      width: badgeWidth,
+      height: badgeHeight
+    }));
+
+  const available = candidates.find((candidate) => !placedLabels.some((placed) => boxesOverlap(candidate, placed, 5)));
+  if (available) return available;
+
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: placedLabels.reduce((total, placed) => total + overlapArea(candidate, placed), 0)
+    }))
+    .sort((a, b) => a.score - b.score)[0];
+}
+
+function labelCandidates(box, badgeWidth, badgeHeight, gap) {
+  const inset = 8;
+  const centerX = Math.round((box.left + box.right - badgeWidth) / 2);
+  const centerY = Math.round((box.top + box.bottom - badgeHeight) / 2);
+
+  return [
+    { left: box.left + inset, top: box.top + inset },
+    { left: box.right - badgeWidth - inset, top: box.top + inset },
+    { left: box.left + inset, top: box.bottom - badgeHeight - inset },
+    { left: box.right - badgeWidth - inset, top: box.bottom - badgeHeight - inset },
+    { left: centerX, top: box.top + inset },
+    { left: centerX, top: box.bottom - badgeHeight - inset },
+    { left: box.left, top: box.top - badgeHeight - gap },
+    { left: box.right - badgeWidth, top: box.top - badgeHeight - gap },
+    { left: box.left, top: box.bottom + gap },
+    { left: box.right - badgeWidth, top: box.bottom + gap },
+    { left: box.left - badgeWidth - gap, top: box.top },
+    { left: box.right + gap, top: box.top },
+    { left: box.left - badgeWidth - gap, top: centerY },
+    { left: box.right + gap, top: centerY }
+  ];
+}
+
+function boxesOverlap(a, b, padding = 0) {
+  return !(
+    a.left + a.width + padding <= b.left ||
+    b.left + b.width + padding <= a.left ||
+    a.top + a.height + padding <= b.top ||
+    b.top + b.height + padding <= a.top
+  );
+}
+
+function overlapArea(a, b) {
+  const xOverlap = Math.max(0, Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left));
+  const yOverlap = Math.max(0, Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top));
+  return xOverlap * yOverlap;
+}
+
+function toPublicDamage(damage, imageWidth, imageHeight) {
+  const { box_1000, ...publicDamage } = damage;
+  return {
+    ...publicDamage,
+    measurement: buildMeasurement(box_1000, imageWidth, imageHeight)
+  };
+}
+
+function buildMeasurement(box, imageWidth, imageHeight) {
+  const widthPx = Math.max(1, Math.round(((box.right - box.left) / 1000) * imageWidth));
+  const heightPx = Math.max(1, Math.round(((box.bottom - box.top) / 1000) * imageHeight));
+  return {
+    width_px: widthPx,
+    height_px: heightPx,
+    width_percent_of_image: roundToOne((widthPx / imageWidth) * 100),
+    height_percent_of_image: roundToOne((heightPx / imageHeight) * 100),
+    note: MEASUREMENT_NOTE
+  };
+}
+
+function normalizeDentDepth(value, damageType) {
+  if (damageType !== "dent") return undefined;
+  const normalized = String(value || "unknown").toLowerCase();
+  return ["shallow", "moderate", "deep", "unknown"].includes(normalized) ? normalized : "unknown";
+}
+
+function roundToOne(value) {
+  return Math.round(value * 10) / 10;
 }
 
 function clampInt(value, minimum, maximum, fallback) {
