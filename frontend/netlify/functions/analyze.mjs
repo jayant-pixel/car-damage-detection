@@ -16,8 +16,8 @@ Return exactly one JSON object using this schema:
   "damages": [
     {
       "label": "short human readable label",
-      "damage_type": "scratch|dent|crack|paint_damage|bumper_damage|glass_damage|light_damage|panel_deformation|missing_part|other",
-      "part": "specific damaged car part, for example front bumper, left door, hood, rear quarter panel",
+      "damage_type": "scratch|dent|crack|paint_damage|bumper_damage|glass_damage|light_damage|panel_deformation|missing_part|tyre_damage|wheel_damage|rim_damage|other",
+      "part": "specific damaged car part, for example front bumper, left door, hood, rear quarter panel, front tyre, rear wheel, alloy rim",
       "part_confidence": 0.0,
       "severity": "minor|moderate|severe",
       "confidence": 0.0,
@@ -41,12 +41,19 @@ Rules:
 - If no obvious damage is visible, return an empty damages array.
 - Keep labels short and practical.
 - For every damage, name only the damaged part, not every visible vehicle part.
+- Scan the complete visible vehicle from left-to-right and top-to-bottom before finalizing the JSON.
+- Inspect every visible exterior zone: bumper, grille, lights, bonnet/hood, fenders, doors, mirrors, windshield, windows, roof, pillars, quarter panels, tyres, wheels, rims, and visible underbody pieces.
+- Tyres, wheels, and rims are critical inspection parts. Never ignore a visible tyre/wheel/rim issue just because nearby body damage is more obvious.
+- Mark tyre/wheel damage when a tyre is cut, torn, shredded, displaced, tilted, deflated, detached, rubbing, exposed through broken bodywork, or visibly deformed.
+- Mark rim/wheel damage when the wheel angle, rim, spokes, hub area, or wheel well suggests impact damage.
+- If one crash region contains multiple damaged part types, return separate boxes for major distinct parts such as bumper damage and tyre/wheel damage.
 - Use dent_depth only for dents. Use "unknown" if depth cannot be judged from the photo.
 - Confidence and part_confidence must be between 0.0 and 1.0.
 `.trim();
 
 const USER_PROMPT = `
-Inspect this car image and identify visible exterior damage locations.
+Inspect the full car image and identify every visible exterior damage location, including tyres, wheels, rims, and wheel wells.
+Do a complete pass over the image before answering: front, sides, glass, lights, panels, bumper, grille, underbody, tyres, wheels, and rims.
 Focus on exact damaged region, damage type, affected part name, part confidence, severity, dent depth when relevant, and short evidence text.
 Respond with valid JSON only.
 `.trim();
@@ -101,7 +108,7 @@ export async function handler(event) {
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0,
-        maxOutputTokens: 900
+        maxOutputTokens: 1200
       }
     });
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import logoUrl from "./assets/surens-infotek-logo.png";
 import "./styles.css";
 
 type Damage = {
@@ -106,31 +107,27 @@ function App() {
 
   return (
     <main className="app-shell">
-      <section className="hero-panel">
-        <div className="nav-line">
-          <span className="brand-mark">DL</span>
-          <span>DamageLens Inspection</span>
-        </div>
-        <div className="hero-grid">
+      <header className="app-header">
+        <div className="brand-lockup">
+          <img src={logoUrl} alt="Suren's Infotek" />
           <div>
-            <p className="eyebrow">Vehicle damage detection</p>
-            <h1>Upload a car photo. Get marked damage zones and a clear report.</h1>
-            <p className="hero-copy">
-              Inspect exterior vehicle damage from a photo, highlight the visible impact areas,
-              and summarize affected parts.
-            </p>
-          </div>
-          <div className="status-card">
-            <span className="status-dot" />
-            <strong>Secure inspection workflow</strong>
-            <p>Your upload is processed through a protected serverless function.</p>
+            <strong>DamageLens Inspection</strong>
+            <span>AI vehicle damage analysis</span>
           </div>
         </div>
-      </section>
+        <div className="workflow-status">
+          <span className="status-dot" />
+          <span>Secure inspection workflow</span>
+        </div>
+      </header>
 
       <section className="workspace-grid">
         <aside className="control-card">
-          <h2>Start inspection</h2>
+          <div className="panel-heading">
+            <span className="section-label">Start inspection</span>
+            <h1>Upload a vehicle photo</h1>
+            <p>Get marked damage zones and a concise inspection report.</p>
+          </div>
           <div
             className={`dropzone ${isDragging ? "is-dragging" : ""}`}
             onDragOver={(event) => {
@@ -163,11 +160,17 @@ function App() {
             />
             <div className="upload-icon">+</div>
             <strong>{file ? file.name : "Drop image here or browse"}</strong>
-            <span>JPG, PNG, or WEBP vehicle photo</span>
+            <span>JPG, PNG, or WEBP under 4MB</span>
           </div>
 
-          <button className="primary-action" disabled={isLoading || !file} onClick={analyzeUpload}>
-            Analyze image
+          <button
+            className="primary-action"
+            disabled={isLoading || !file}
+            onClick={analyzeUpload}
+            aria-busy={isLoading}
+          >
+            {isLoading && <span className="button-spinner" aria-hidden="true" />}
+            <span>{isLoading ? "Analyzing" : "Analyze image"}</span>
           </button>
 
           <p className="helper-text">{message}</p>
@@ -190,7 +193,7 @@ function App() {
 
 function ImageFrame({ title, src, emptyText }: { title: string; src: string; emptyText: string }) {
   return (
-    <div className="image-frame">
+    <div className={`image-frame ${src ? "has-image" : ""}`}>
       <div className="frame-title">{title}</div>
       {src ? <img src={src} alt={title} /> : <div className="empty-frame">{emptyText}</div>}
     </div>
@@ -235,7 +238,11 @@ function Report({ result }: { result: AnalysisResponse | null }) {
       ) : (
         <div className="damage-list">
           {result.damages.map((damage, index) => (
-            <article className="damage-card" key={`${damage.label}-${index}`}>
+            <article
+              className="damage-card"
+              key={`${damage.label}-${index}`}
+              style={{ "--item-index": index } as React.CSSProperties}
+            >
               <div className="damage-index">{index + 1}</div>
               <div>
                 <h3>{damage.label}</h3>
