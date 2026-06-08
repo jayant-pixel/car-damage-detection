@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/netlify-dev.mjs",
     "dev:raw": "netlify dev",
+    "convex:dev": "convex dev",
     "vite": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
@@ -13,14 +14,17 @@
   "dependencies": {
     "@google/genai": "^1.36.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "convex": "^1.38.0",
     "dotenv": "^17.2.0",
-    "sharp": "^0.34.0",
+    "jpeg-js": "^0.4.4",
+    "pdf-lib": "^1.17.1",
     "vite": "^7.0.0",
     "typescript": "^5.8.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "netlify-cli": "^24.11.2"
