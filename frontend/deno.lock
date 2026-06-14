@@ -12,14 +12,18 @@
     "packageJson": {
       "dependencies": [
         "npm:@google/genai@^1.36.0",
+        "npm:@types/node@^25.6.0",
         "npm:@types/react-dom@19",
         "npm:@types/react@19",
         "npm:@vitejs/plugin-react@5",
+        "npm:convex@^1.38.0",
         "npm:dotenv@^17.2.0",
+        "npm:google-auth-library@^10.7.0",
+        "npm:jpeg-js@~0.4.4",
         "npm:netlify-cli@^24.11.2",
+        "npm:pdf-lib@^1.17.1",
         "npm:react-dom@19",
         "npm:react@19",
-        "npm:sharp@0.34",
         "npm:typescript@^5.8.0",
         "npm:vite@7"
       ]

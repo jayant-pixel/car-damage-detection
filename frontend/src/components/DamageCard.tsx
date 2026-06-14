@@ -2,7 +2,7 @@ import React from "react";
 import logoUrl from "../assets/surens-infotek-logo.png";
 import { EvidenceImage } from "./EvidenceImage";
 import { DamageResult } from "../lib/types";
-import { labelize } from "../lib/utils";
+import { labelize, labelizeDamageType } from "../lib/utils";
 
 export interface DamageCardProps {
   damage: DamageResult;
@@ -19,10 +19,28 @@ export function DamageCard({ damage, index }: DamageCardProps) {
     box1000,
     imageUrl,
     recommendation,
-    viewLabel
+    viewLabel,
+    source,
+    intensityScore
   } = damage;
 
   const severityClass = severity.toLowerCase();
+
+  // Dynamic intensity color mapping for premium look
+  const intensityBg = intensityScore
+    ? intensityScore >= 8
+      ? "rgba(229, 62, 62, 0.15)"
+      : intensityScore >= 4
+      ? "rgba(221, 107, 32, 0.15)"
+      : "rgba(49, 151, 149, 0.15)"
+    : "rgba(113, 128, 150, 0.15)";
+  const intensityText = intensityScore
+    ? intensityScore >= 8
+      ? "#e53e3e"
+      : intensityScore >= 4
+      ? "#dd6b20"
+      : "#319795"
+    : "#718096";
 
   return (
     <div className="damage-card">
@@ -36,11 +54,27 @@ export function DamageCard({ damage, index }: DamageCardProps) {
             </span>
           </div>
         </div>
-        <div className="header-indicators">
+        <div className="header-indicators" style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          {intensityScore !== undefined && (
+            <span
+              className="intensity-score-badge"
+              style={{
+                backgroundColor: intensityBg,
+                color: intensityText,
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "0.75rem",
+                fontWeight: 600,
+                border: `1px solid ${intensityText}40`
+              }}
+            >
+              Intensity: {intensityScore}/10
+            </span>
+          )}
           <span className={`severity-badge ${severityClass}`}>
             {severity}
           </span>
-          <span className="type-badge">{damageType}</span>
+          <span className="type-badge">{labelizeDamageType(damageType)}</span>
         </div>
       </header>
 

@@ -13,6 +13,7 @@ export interface Inspection {
   totalImages: number;
   createdAt: number;
   completedAt?: number;
+  reportSummary?: string;
 }
 
 export type MediaSlot =
@@ -32,6 +33,8 @@ export interface InspectionMedia {
   viewLabel?: string;
   uploadedAt: number;
   url?: string | null;
+  annotatedStorageId?: string;
+  annotatedImageUrl?: string | null;
 }
 
 export interface PartCoverage {
@@ -39,6 +42,7 @@ export interface PartCoverage {
   fileName: string;
   viewLabel: string;
   imageUrl?: string | null;
+  annotatedImageUrl?: string | null;
   visiblePartDescriptions: string[];
   mappedParts: Array<{
     partName: string;
@@ -72,9 +76,12 @@ export interface DamageResult {
   recommendation: string;
   createdAt: number;
   imageUrl?: string | null;
+  annotatedImageUrl?: string | null;
   partCropUrl?: string | null;
   viewLabel?: string;
   fileName?: string;
+  source?: "ml_model" | "vision_model";
+  intensityScore?: number;
 }
 
 export interface RoiScan {

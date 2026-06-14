@@ -148,7 +148,7 @@ export function InspectionPage({
   const handleStartClassification = async () => {
     try {
       await startClassification({ inspectionId: inspectionId as any });
-      setNotice({ tone: "success", text: "Evidence locked. AI classification started!" });
+      setNotice({ tone: "success", text: "Evidence locked. View classification started!" });
     } catch (err: any) {
       setNotice({ tone: "danger", text: err.message || "Failed to start view classification." });
     }
@@ -338,7 +338,7 @@ export function InspectionPage({
               // 3. CLASSIFYING VIEWS STATE
               <>
                 <div className="review-gallery-header">
-                  <h3>Classifying Camera Angles... ({media.length} image(s))</h3>
+                  <h3>Detecting Camera Angles... ({media.length} image(s))</h3>
                   <button
                     className="secondary-action modify-evidence-btn"
                     disabled={true}
@@ -359,9 +359,9 @@ export function InspectionPage({
                         <strong>
                           Image {String(idx + 1).padStart(2, "0")} : {item.fileName}
                         </strong>
-                        <span>AI is determining view angle...</span>
+                        <span>Detecting view angle...</span>
                       </div>
-                      <span className="locked-badge classifying">Classifying</span>
+                      <span className="locked-badge classifying">Processing</span>
                     </div>
                   ))}
                 </div>
@@ -369,10 +369,10 @@ export function InspectionPage({
                 <div className="bulk-upload-actions" style={{ flexDirection: "column", gap: "1rem" }}>
                   <div className="spinner-loader" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                     <span className="spinner" />
-                    <strong>AI is labeling views...</strong>
+                    <strong>Processing views...</strong>
                   </div>
                   <p className="subtitle" style={{ margin: 0 }}>
-                    {inspection.progressMessage || "Running Gemini camera classification..."}
+                    {inspection.progressMessage || "Processing camera views..."}
                   </p>
                 </div>
               </>

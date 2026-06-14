@@ -133,8 +133,8 @@ export function App() {
     return (
       <main className="setup-shell">
         <div className="setup-panel">
-          <h2>Convex Configuration Required</h2>
-          <p>Please define <code>VITE_CONVEX_URL</code> in your environment variables.</p>
+          <h2>Backend Configuration Required</h2>
+          <p>The application backend is not configured. Please contact your administrator.</p>
         </div>
       </main>
     );

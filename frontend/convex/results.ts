@@ -29,10 +29,14 @@ export const getInspectionResults = query({
       damages.map(async (item) => {
         const mediaItem = mediaById.get(item.mediaId.toString()) || null;
         const imageUrl = mediaItem ? await ctx.storage.getUrl(mediaItem.storageId) : null;
+        const annotatedImageUrl = (mediaItem && mediaItem.annotatedStorageId)
+          ? await ctx.storage.getUrl(mediaItem.annotatedStorageId)
+          : null;
         const partCropUrl = item.partCropStorageId ? await ctx.storage.getUrl(item.partCropStorageId) : null;
         return {
           ...item,
           imageUrl,
+          annotatedImageUrl,
           partCropUrl,
           viewLabel: mediaItem?.viewLabel || "Exterior View",
           fileName: mediaItem?.fileName || "Unknown file"
@@ -61,6 +65,7 @@ export const getInspectionResults = query({
         fileName: item.fileName,
         viewLabel: item.viewLabel || "Exterior View",
         imageUrl: await ctx.storage.getUrl(item.storageId),
+        annotatedImageUrl: item.annotatedStorageId ? await ctx.storage.getUrl(item.annotatedStorageId) : null,
         visiblePartDescriptions: item.visiblePartDescriptions || [],
         mappedParts: (item.mappedParts || []).map((part) => ({
           partName: part.partName,

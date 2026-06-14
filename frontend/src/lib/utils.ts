@@ -11,6 +11,13 @@ export function labelize(value: string): string {
   return value.replaceAll("_", " ");
 }
 
+export function labelizeDamageType(value: string): string {
+  if (!value) return "";
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function vehicleName(session: {
   carModel?: string;
   vehicleNumber?: string;

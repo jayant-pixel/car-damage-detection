@@ -75,7 +75,8 @@ export default defineSchema({
     totalImages: v.number(),
     classificationStatus: v.optional(classificationStatus),
     createdAt: v.number(),
-    completedAt: v.optional(v.number())
+    completedAt: v.optional(v.number()),
+    reportSummary: v.optional(v.string())
   })
     .index("by_status", ["status"])
     .index("by_createdAt", ["createdAt"]),
@@ -89,6 +90,7 @@ export default defineSchema({
     storageId: v.id("_storage"),
     viewLabel: v.optional(v.string()), // e.g. "front", "rear", "left_side", "right_side", "close_up"
     visiblePartDescriptions: v.optional(v.array(v.string())),
+    annotatedStorageId: v.optional(v.id("_storage")),
     mappedParts: v.optional(
       v.array(
         v.object({
@@ -98,6 +100,7 @@ export default defineSchema({
         })
       )
     ),
+    carBoundingBox1000: v.optional(box1000),
     uploadedAt: v.number()
   })
     .index("by_inspectionId", ["inspectionId"])
@@ -115,6 +118,8 @@ export default defineSchema({
     isFromPartScan: v.boolean(),
     partCropStorageId: v.optional(v.id("_storage")),
     recommendation: v.string(),
+    source: v.optional(v.union(v.literal("ml_model"), v.literal("vision_model"))),
+    intensityScore: v.optional(v.number()),
     createdAt: v.number()
   })
     .index("by_inspectionId", ["inspectionId"])

@@ -180,3 +180,30 @@ export const updateMediaVisiblePartDescriptions = internalMutation({
     await ctx.db.patch(mediaId, { visiblePartDescriptions });
   }
 });
+
+export const updateMediaAnnotatedStorageId = internalMutation({
+  args: {
+    mediaId: v.id("inspectionMedia"),
+    annotatedStorageId: v.id("_storage")
+  },
+  handler: async (ctx, { mediaId, annotatedStorageId }) => {
+    await ctx.db.patch(mediaId, { annotatedStorageId });
+  }
+});
+
+export const updateMediaCarBoundingBox = internalMutation({
+  args: {
+    mediaId: v.id("inspectionMedia"),
+    carBoundingBox1000: v.optional(
+      v.object({
+        left: v.number(),
+        top: v.number(),
+        right: v.number(),
+        bottom: v.number()
+      })
+    )
+  },
+  handler: async (ctx, { mediaId, carBoundingBox1000 }) => {
+    await ctx.db.patch(mediaId, { carBoundingBox1000 });
+  }
+});

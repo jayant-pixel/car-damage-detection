@@ -2,10 +2,10 @@ import React from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import logoUrl from "../assets/surens-infotek-logo.png";
-import { DamageCard } from "../components/DamageCard";
+import { EvidenceImage } from "../components/EvidenceImage";
 import { EmptyState, Metric, RiskPill } from "../components/common";
 import { PartCoverage } from "../lib/types";
-import { formatDate, labelize } from "../lib/utils";
+import { formatDate, labelize, labelizeDamageType } from "../lib/utils";
 
 export interface ReportPrintPageProps {
   inspectionId: string;
@@ -123,14 +123,198 @@ export function ReportPrintPage({ inspectionId, onBack }: ReportPrintPageProps) 
       </section>
 
       <section className="results-section">
-        <h2>Identified Surface Damage Findings</h2>
-        {damages.length === 0 ? (
-          <EmptyState title="No surface defects detected" text="No scratches, dents, scuffs, or paint chips were confirmed." />
+        <h2>Identified Surface Damage Findings by Photo Angle</h2>
+        <p className="section-intro" style={{ marginBottom: "0.5rem" }}>
+          The following damage points were identified using full-image systematic anomaly analysis. View the original photo and the visual annotations side-by-side, with detailed findings listed below.
+        </p>
+        <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.5rem", alignItems: "center" }}>
+          <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "#4a5568" }}>Severity Legend:</span>
+          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#319795", display: "inline-block" }} />
+            <span style={{ fontSize: "0.75rem", color: "#4a5568" }}>Minor</span>
+          </span>
+          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#dd6b20", display: "inline-block" }} />
+            <span style={{ fontSize: "0.75rem", color: "#4a5568" }}>Moderate</span>
+          </span>
+          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#e53e3e", display: "inline-block" }} />
+            <span style={{ fontSize: "0.75rem", color: "#4a5568" }}>Severe</span>
+          </span>
+        </div>
+
+        {partCoverage.length === 0 ? (
+          <EmptyState title="No photo data available" text="No vehicle images were found for this audit session." />
         ) : (
-          <div className="damage-cards-stack">
-            {damages.map((damage: any, index: number) => (
-              <DamageCard key={damage._id} damage={damage} index={index} />
-            ))}
+          <div className="damage-images-stack" style={{ display: "flex", flexDirection: "column", gap: "2rem" }}>
+            {(() => {
+              // Group damages by mediaId
+              const damagesByMediaId = new Map<string, any[]>();
+              for (const dmg of damages) {
+                const mediaIdStr = dmg.mediaId.toString();
+                const list = damagesByMediaId.get(mediaIdStr) || [];
+                list.push(dmg);
+                damagesByMediaId.set(mediaIdStr, list);
+              }
+
+              return partCoverage
+                .filter((item) => {
+                  const imgDamages = damagesByMediaId.get(item.mediaId.toString()) || [];
+                  return imgDamages.length > 0; // Only show images that have damage findings
+                })
+                .map((item) => {
+                const imgDamages = damagesByMediaId.get(item.mediaId.toString()) || [];
+                return (
+                  <div
+                    key={item.mediaId}
+                    className="surface damage-image-group-card"
+                    style={{
+                      padding: "1.5rem",
+                      borderRadius: "12px",
+                      border: "1px solid #e2e8f0",
+                      backgroundColor: "#fff",
+                      pageBreakInside: "avoid",
+                      breakInside: "avoid",
+                      marginBottom: "1rem"
+                    }}
+                  >
+                    {/* Header */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", borderBottom: "1px solid #edf2f7", paddingBottom: "0.75rem" }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 700, color: "#1a202c" }}>
+                          {item.viewLabel || "Exterior View"}
+                        </h3>
+                        <span style={{ fontSize: "0.8rem", color: "#718096" }}>File: {item.fileName}</span>
+                      </div>
+                      <span
+                        style={{
+                          backgroundColor: imgDamages.length > 0 ? "rgba(221, 107, 32, 0.1)" : "rgba(49, 151, 149, 0.1)",
+                          color: imgDamages.length > 0 ? "#dd6b20" : "#319795",
+                          padding: "2px 10px",
+                          borderRadius: "20px",
+                          fontSize: "0.75rem",
+                          fontWeight: 600
+                        }}
+                      >
+                        {imgDamages.length} Damage{imgDamages.length === 1 ? "" : "s"} Detected
+                      </span>
+                    </div>
+
+                    {/* Side-by-side Images */}
+                    <div
+                      className="image-side-by-side-container"
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: "1rem",
+                        marginBottom: "1.5rem",
+                        backgroundColor: "#f7fafc",
+                        padding: "0.5rem",
+                        borderRadius: "8px",
+                        border: "1px solid #edf2f7"
+                      }}
+                    >
+                      <div>
+                        <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#4a5568", marginBottom: "2px", textAlign: "center" }}>Original Context</span>
+                        <div style={{ borderRadius: "6px", overflow: "hidden", height: "320px", border: "1px solid #e2e8f0", position: "relative", backgroundColor: "#000" }}>
+                          <img
+                            src={item.imageUrl || ""}
+                            alt="Original Context"
+                            style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: "#4a5568", marginBottom: "2px", textAlign: "center" }}>Annotated View</span>
+                        <div style={{ borderRadius: "6px", overflow: "hidden", height: "320px", border: "1px solid #e2e8f0", position: "relative", backgroundColor: "#000" }}>
+                          <EvidenceImage
+                            imageUrl={item.annotatedImageUrl || item.imageUrl || ""}
+                            altText="Annotated View"
+                            objectFit="contain"
+                            boxes1000={item.annotatedImageUrl ? [] : imgDamages.map((dmg: any) => ({ ...dmg.box1000, severity: dmg.severity }))}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Findings list below the images */}
+                    <div className="findings-details-container">
+                      {imgDamages.length === 0 ? (
+                        <p style={{ margin: 0, fontSize: "0.85rem", color: "#718096", fontStyle: "italic", textAlign: "center", padding: "0.5rem 0" }}>
+                          No visual defects identified on this camera angle.
+                        </p>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                          <h4 style={{ margin: 0, fontSize: "0.9rem", fontWeight: 700, color: "#2d3748", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            Identified Anomalies:
+                          </h4>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                            {imgDamages.map((dmg, idx) => {
+                              const severityClass = dmg.severity.toLowerCase();
+                              const score = dmg.intensityScore;
+                              const intensityBg = score
+                                ? score >= 8 ? "rgba(229, 62, 62, 0.1)" : score >= 4 ? "rgba(221, 107, 32, 0.1)" : "rgba(49, 151, 149, 0.1)"
+                                : "rgba(113, 128, 150, 0.1)";
+                              const intensityText = score
+                                ? score >= 8 ? "#e53e3e" : score >= 4 ? "#dd6b20" : "#319795"
+                                : "#718096";
+
+                              return (
+                                <div
+                                  key={dmg._id}
+                                  style={{
+                                    padding: "0.75rem",
+                                    borderRadius: "8px",
+                                    backgroundColor: "#f7fafc",
+                                    border: "1px solid #edf2f7",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "0.25rem",
+                                    pageBreakInside: "avoid"
+                                  }}
+                                >
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                                    <span style={{ fontWeight: 700, color: "#2d3748", fontSize: "0.9rem" }}>
+                                      #{idx + 1}. {labelize(dmg.part)} · <span style={{ textTransform: "capitalize", color: "#4a5568", fontWeight: 500 }}>{labelizeDamageType(dmg.damageType)}</span>
+                                    </span>
+                                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                                      {score !== undefined && (
+                                        <span
+                                          style={{
+                                            backgroundColor: intensityBg,
+                                            color: intensityText,
+                                            padding: "2px 6px",
+                                            borderRadius: "12px",
+                                            fontSize: "0.7rem",
+                                            fontWeight: 600,
+                                            border: `1px solid ${intensityText}30`
+                                          }}
+                                        >
+                                          Intensity: {score}/10
+                                        </span>
+                                      )}
+                                      <span className={`severity-badge ${severityClass}`} style={{ fontSize: "0.7rem", padding: "1px 6px", borderRadius: "12px" }}>
+                                        {dmg.severity}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <p style={{ margin: 0, fontSize: "0.85rem", color: "#4a5568", lineHeight: "1.4" }}>
+                                    {dmg.description}
+                                  </p>
+                                  <div style={{ fontSize: "0.8rem", color: "#718096" }}>
+                                    <strong>Action:</strong> {dmg.recommendation}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
       </section>

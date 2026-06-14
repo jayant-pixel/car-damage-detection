@@ -1,24 +1,72 @@
 # DamageLens Vehicle Inspection
 
-DamageLens is a Netlify-only vehicle damage inspection website. Users upload a car photo, the site returns a marked image plus a plain-language damage report, and provider/model details stay hidden from the UI.
+DamageLens is an enterprise vehicle claims audit application. The current UI uses Convex for case records, media storage, realtime processing state, audit findings, and export records, while the existing Netlify Function remains as a legacy single-image analysis fallback.
 
-## Netlify-Only Architecture
+## Enterprise Convex Workflow
+
+The current frontend has been upgraded to a case-based enterprise claims audit workflow:
+
+- dashboard queue
+- session-based analysis workspace
+- 11-slot image upload grid
+- Convex file uploads
+- asynchronous processing timeline
+- AI visual anomaly and relational consistency findings
+- generated PDF reports linked to sessions
+
+Convex is now the primary data layer for cases, media, jobs, audit results, and export records.
+
+Required frontend environment variable:
+
+```env
+VITE_CONVEX_URL=https://your-deployment.convex.cloud
+VITE_APP_LOGIN_EMAIL=auditor@example.com
+VITE_APP_LOGIN_PASSWORD=change-this-password
+VITE_APP_PROFILE_NAME=Auditor
+```
+
+Required Convex environment variables for AI visual anomaly and relational vehicle analysis:
+
+```env
+GOOGLE_API_KEY=your_google_ai_api_key
+GEMMA_MODEL_ID=gemini-3.5-flash
+```
+
+Because SynthID detector access is not available yet, the Convex action uses Gemini multimodal image understanding to inspect uploaded claim photos for visible damage, edit/manipulation anomalies, and cross-image vehicle consistency. It compares model class, paint, trim, lamps, wheels, body geometry, documents, and damage continuity across the uploaded media slots.
+
+Gemini model choice:
+
+- Default: `gemini-3.5-flash`
+- Override: set `GEMMA_MODEL_ID` in Convex if a deployment needs a different Gemini-compatible model.
+- The native Gemini visual pipeline is the default damage-analysis flow. The Cloud Run / YOLO ML endpoint path is temporarily disabled in the Convex analysis action.
+- Gemini-returned damage boxes are stored with findings and used to annotate result and print views. The backend also attempts to persist marked JPEG copies when the source image can be decoded as JPEG.
+
+Install and initialize Convex from inside `frontend/`:
+
+```powershell
+npm install
+npx convex dev
+```
+
+This shell may need to be PowerShell or a WSL 2/Linux Node environment. WSL 1 with a Windows Node install can fail before npm starts.
+
+## Current Architecture
 
 ```text
 Browser
   -> Netlify static React app
-  -> Netlify Function /.netlify/functions/analyze
-  -> Google hosted model API
-  -> Serverless image annotation with sharp
-  -> Annotated image + report returned to browser
+  -> Convex database, functions, file storage, and reactive queries
+  -> Convex processing actions
+  -> Analysis sessions and generated PDF reports
 ```
 
-No separate FastAPI backend is required for the Netlify deployment path.
+The legacy `/.netlify/functions/analyze` endpoint is still present for the older single-image flow, but the enterprise workflow is backed by Convex.
 
 ## Project Layout
 
 ```text
 frontend/
+  convex/
   src/main.tsx
   src/styles.css
   netlify/functions/analyze.mjs
@@ -34,8 +82,12 @@ netlify.toml
 4. Add these Netlify environment variables:
 
 ```env
+VITE_CONVEX_URL=https://your-deployment.convex.cloud
+VITE_APP_LOGIN_EMAIL=auditor@example.com
+VITE_APP_LOGIN_PASSWORD=change-this-password
+VITE_APP_PROFILE_NAME=Auditor
 GOOGLE_API_KEY=your_google_ai_api_key
-GEMMA_MODEL_ID=gemma-4-26b-a4b-it
+GEMMA_MODEL_ID=gemini-3.5-flash
 ```
 
 5. Deploy.
@@ -53,7 +105,7 @@ directory = "netlify/functions"
 node_bundler = "esbuild"
 ```
 
-## Local Netlify-Style Development
+## Local Development
 
 Install frontend dependencies:
 
@@ -62,50 +114,57 @@ cd frontend
 npm install
 ```
 
-Create a local env file in the repo root:
+Start Convex from inside `frontend/`:
 
 ```powershell
-cd ..
+npx convex dev
+```
+
+Create a local env file for the frontend:
+
+```powershell
 notepad .env
 ```
 
 Add:
 
 ```env
+VITE_CONVEX_URL=https://your-deployment.convex.cloud
 GOOGLE_API_KEY=your_google_ai_api_key
-GEMMA_MODEL_ID=gemma-4-26b-a4b-it
+GEMMA_MODEL_ID=gemini-3.5-flash
 ```
 
-Run the full Netlify local environment from the repo root:
+Set the AI visual analyzer variables in Convex:
 
 ```powershell
-npx netlify-cli dev
+npx convex env set GOOGLE_API_KEY your_google_ai_api_key
+npx convex env set GEMMA_MODEL_ID gemini-3.5-flash
 ```
 
-Open only this URL:
-
-```text
-http://localhost:8888
-```
-
-Do not use the Vite-only URL for image analysis. Plain Vite does not run Netlify Functions.
-
-If you want the local command from inside `frontend/`, run:
+Run the local web app from inside `frontend/`:
 
 ```powershell
 npm run dev
 ```
 
+Open the URL printed by Netlify/Vite, usually:
+
+```text
+http://localhost:8888
+```
+
+The legacy single-image Netlify Function still requires Netlify dev. The enterprise Convex workflow requires Convex dev and `VITE_CONVEX_URL`.
+
 ## User-Facing Behavior
 
 The UI shows only:
 
-- image upload
-- loading animation
-- input image
-- annotated output image
-- inspection summary
-- damage findings
+- landing and static login
+- Dashboard
+- Analysis
+- Reports
+- linked session images
+- generated report PDFs
 
 The visible UI does not show model names, API request payloads, backend names, or raw JSON.
 

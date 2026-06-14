@@ -2,6 +2,7 @@
 
 import { v } from "convex/values";
 import { Buffer } from "node:buffer";
+import { decode as decodeJpeg, encode as encodeJpeg } from "jpeg-js";
 import { api, internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
 
@@ -12,6 +13,7 @@ type ImagePayload = {
   media: any;
   mimeType: string;
   base64: string;
+  originalBase64?: string;
 };
 type AnalysisGroup = {
   key: string;
@@ -24,29 +26,24 @@ type GroupAnalysisResult = {
   imageIds: string[];
   result: any;
 };
+type DamageAnnotation = {
+  box1000: Box1000;
+  severity: "minor" | "moderate" | "severe";
+  damageType: string;
+  index: number;
+};
 
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
 const GEMINI_MAX_ATTEMPTS = readPositiveIntEnv("GEMINI_MAX_ATTEMPTS", 2);
 const DAMAGE_LABELS = [
   "scratch",
   "dent",
-  "tear",
-  "structural_damage",
-  "glass_crack",
-  "glass_chip",
-  "spider_web_fracture",
-  "broken_glass",
-  "panel_gap",
-  "part_dislocation",
-  "misalignment",
-  "missing_part",
-  "wheel_anomaly",
-  "obstruction",
-  "emblem_damage"
+  "damaged"
 ];
 
 // BACKGROUND ACTION RUNNING THE PIPELINE
 export const runAnalysisStage1And2 = internalAction({
-  args: { 
+  args: {
     inspectionId: v.id("inspections")
   },
   handler: async (ctx, { inspectionId }) => {
@@ -65,7 +62,7 @@ export const runAnalysisStage1And2 = internalAction({
 
     try {
       const apiKey = process.env.GOOGLE_API_KEY;
-      const model = process.env.GEMMA_MODEL_ID || "gemini-3.5-flash";
+      const model = process.env.GEMMA_MODEL_ID || DEFAULT_GEMINI_MODEL;
 
       // --- STAGE 1: READ PHOTOS ---
       const media = await ctx.runQuery(api.media.getInspectionMedia, { inspectionId });
@@ -91,6 +88,7 @@ export const runAnalysisStage1And2 = internalAction({
         - imageId exactly as provided
         - viewLabel
         - visiblePartDescriptions with natural descriptions of visible vehicle parts and coverage quality
+        - carBoundingBox1000: The bounding box [left, top, right, bottom] wrapping only the main vehicle in 0-1000 coordinates (0 to 1000 scale) for zoom analysis. Use null if it is "Close-up damage view", "Interior view", "VIN view", or "Odometer view".
 
         Mention important exterior and small parts when visible:
         hood, front bumper, rear bumper, fenders, doors, quarter panels, rocker panels/sills,
@@ -102,6 +100,13 @@ export const runAnalysisStage1And2 = internalAction({
         - If a significant portion of the vehicle is visible, classify it as the matching exterior view.
         - Only use "Close-up damage view" for a tight close-up where the rest of the car is not visible.
 
+        CAR BOUNDING BOX RULES:
+        - Return the tightest bounding box that fully contains the main vehicle in the image.
+        - The coordinates MUST be numbers between 0 and 1000.
+        - Format: {"left": X, "top": Y, "right": X, "bottom": Y}
+        - Leave a small margin (approx. 10-30 units on each side) to avoid clipping.
+        - If there is no vehicle or it is a close-up/interior/VIN/odometer, return null.
+
         Return exactly one JSON object:
         {
           "images": [
@@ -111,7 +116,8 @@ export const runAnalysisStage1And2 = internalAction({
               "visiblePartDescriptions": [
                 "The front bumper is fully visible, including the lower valance and license plate surround.",
                 "The left headlight and left front fender edge are visible with clear inspection coverage."
-              ]
+              ],
+              "carBoundingBox1000": { "left": 120, "top": 200, "right": 880, "bottom": 850 }
             }
           ]
         }
@@ -129,11 +135,28 @@ export const runAnalysisStage1And2 = internalAction({
         const visiblePartDescriptions: string[] = Array.isArray(label?.visiblePartDescriptions)
           ? label.visiblePartDescriptions.filter((d: any) => typeof d === "string")
           : [];
+        const carBoundingBox1000 = label?.carBoundingBox1000 &&
+          typeof label.carBoundingBox1000 === "object" &&
+          typeof label.carBoundingBox1000.left === "number"
+            ? {
+                left: Math.max(0, Math.min(1000, label.carBoundingBox1000.left)),
+                top: Math.max(0, Math.min(1000, label.carBoundingBox1000.top)),
+                right: Math.max(0, Math.min(1000, label.carBoundingBox1000.right)),
+                bottom: Math.max(0, Math.min(1000, label.carBoundingBox1000.bottom))
+              }
+            : undefined;
 
         await ctx.runMutation(internal.media.updateMediaViewLabel, {
           mediaId: payload.media._id,
           viewLabel
         });
+
+        if (carBoundingBox1000) {
+          await ctx.runMutation(internal.media.updateMediaCarBoundingBox, {
+            mediaId: payload.media._id,
+            carBoundingBox1000
+          });
+        }
 
         if (visiblePartDescriptions.length > 0) {
           await ctx.runMutation(internal.media.updateMediaVisiblePartDescriptions, {
@@ -142,7 +165,8 @@ export const runAnalysisStage1And2 = internalAction({
           });
         }
 
-        await log(`Photo "${payload.media.fileName}" identified as: ${viewLabel} (${visiblePartDescriptions.length} part descriptions)`);
+        const boxLogStr = carBoundingBox1000 ? ` (Car box: [L:${carBoundingBox1000.left}, T:${carBoundingBox1000.top}, R:${carBoundingBox1000.right}, B:${carBoundingBox1000.bottom}])` : "";
+        await log(`Photo "${payload.media.fileName}" identified as: ${viewLabel}${boxLogStr} (${visiblePartDescriptions.length} part descriptions)`);
       }
 
       await log("All photos classified from one multi-image request.");
@@ -165,7 +189,7 @@ export const runAnalysisStage1And2 = internalAction({
 });
 
 export const runAnalysisStage3 = internalAction({
-  args: { 
+  args: {
     inspectionId: v.id("inspections")
   },
   handler: async (ctx, { inspectionId }) => {
@@ -184,7 +208,7 @@ export const runAnalysisStage3 = internalAction({
 
     try {
       const apiKey = process.env.GOOGLE_API_KEY;
-      const model = process.env.GEMMA_MODEL_ID || "gemma-4-31b-it";
+      const model = process.env.GEMMA_MODEL_ID || DEFAULT_GEMINI_MODEL;
 
       const media = await ctx.runQuery(api.media.getInspectionMedia, { inspectionId });
       if (!media || media.length === 0) {
@@ -203,13 +227,39 @@ export const runAnalysisStage3 = internalAction({
         return !["VIN view", "Odometer view", "Interior view"].includes(viewLabel);
       });
 
-      await updateProgress("analyzing", 30, "Running parallel grouped anomaly analysis...");
-      await log(`Stage 2/4: Preparing grouped full-resolution analysis for ${exteriorMedia.length} exterior photo(s)...`);
-
       if (exteriorMedia.length === 0) {
         await log("No exterior photos found for damage analysis.");
+        await updateProgress("analyzing", 88, "No exterior photos found. Completing Stage 3.");
       } else {
         const imagePayloads = await loadImagePayloads(ctx, exteriorMedia);
+
+        // --- CROPPING / AUTO-ZOOM PREPROCESSING ---
+        await log("Applying automatic zoom to the car body on wide-angle images...");
+        for (const payload of imagePayloads) {
+          const cropBox = payload.media.carBoundingBox1000;
+          if (cropBox && typeof cropBox === "object") {
+            const paddedBox = {
+              left: Math.max(0, cropBox.left - 40),
+              top: Math.max(0, cropBox.top - 40),
+              right: Math.min(1000, cropBox.right + 40),
+              bottom: Math.min(1000, cropBox.bottom + 40)
+            };
+            
+            // Check if the crop box is significantly smaller than the full image (e.g. less than 95% area)
+            const area = (paddedBox.right - paddedBox.left) * (paddedBox.bottom - paddedBox.top);
+            if (area < 950000 && area > 50000) {
+              await log(`  Zooming into car body for "${payload.media.fileName}" using box [L:${paddedBox.left}, T:${paddedBox.top}, R:${paddedBox.right}, B:${paddedBox.bottom}]`);
+              payload.originalBase64 = payload.base64; // save original for annotation drawing
+              payload.base64 = cropImageBase64(payload.base64, paddedBox);
+              // Store the paddedBox on the media payload so we can reference it when mapping coordinates back!
+              payload.media.cropBox1000 = paddedBox;
+            }
+          }
+        }
+
+        await log("Stage 3: Running visual damage analysis.");
+        await updateProgress("analyzing", 40, "Running visual anomaly group analysis...");
+
         const groups = buildAnalysisGroups(imagePayloads);
         await log(`  Running ${groups.length} group(s) in parallel: ${groups.map((group) => group.label).join(", ")}.`);
 
@@ -220,13 +270,22 @@ export const runAnalysisStage3 = internalAction({
         await updateProgress("analyzing", 72, "Reconciling grouped analysis outputs...");
         const finalAnalysis = await reconcileGroupAnalyses(apiKey, model, groupResults, imagePayloads);
         const analysis = hasAnalysisImages(finalAnalysis) ? finalAnalysis : combineGroupAnalyses(groupResults);
+
         await persistAnalysisResult(ctx, inspectionId, imagePayloads, analysis, log);
+
+        const count = countResultDamages(analysis);
+        const reportSummary = `### Vehicle Inspection Report Summary\n\n* **Damages Detected**: ${count} surface defect(s) found.\n\nAll exterior panels have been inspected. Details for each finding are listed in the damage catalog cards below.\n`;
+
+        await ctx.runMutation(internal.inspections.updateReportSummary, {
+          inspectionId,
+          reportSummary
+        });
       }
 
-      await log("Parallel grouped damage analysis complete.");
+      await log("Stage 3 completed successfully.");
       await updateProgress("analyzing", 88, "Damage analysis complete. Reconciling findings...");
 
-      await ctx.scheduler.runAfter(0, internal.processing.runAnalysisStage5And6, { 
+      await ctx.scheduler.runAfter(0, internal.processing.runAnalysisStage5And6, {
         inspectionId
       });
     } catch (error: any) {
@@ -238,7 +297,7 @@ export const runAnalysisStage3 = internalAction({
 });
 
 export const runAnalysisStage5And6 = internalAction({
-  args: { 
+  args: {
     inspectionId: v.id("inspections")
   },
   handler: async (ctx, { inspectionId }) => {
@@ -257,7 +316,7 @@ export const runAnalysisStage5And6 = internalAction({
 
     try {
       const apiKey = process.env.GOOGLE_API_KEY;
-      const model = process.env.GEMMA_MODEL_ID || "gemma-4-31b-it";
+      const model = process.env.GEMMA_MODEL_ID || DEFAULT_GEMINI_MODEL;
       if (!apiKey) throw new Error("API Key is missing in Stage 5 & 6");
 
       const media = await ctx.runQuery(api.media.getInspectionMedia, { inspectionId });
@@ -266,97 +325,7 @@ export const runAnalysisStage5And6 = internalAction({
       }
       const sortedMedia = [...media].sort((a, b) => a._creationTime - b._creationTime);
 
-      await updateProgress("analyzing", 90, "Deduplicating findings across views...");
-      await log("Stage 3/4: Running deterministic and AI deduplication on full-resolution findings...");
-
-      const allFindingsBeforeCleanup = await ctx.runQuery(api.results.getInspectionDamageResults, { inspectionId });
-      const deterministicDuplicateIds = findDeterministicDuplicateIds(allFindingsBeforeCleanup);
-      if (deterministicDuplicateIds.length > 0) {
-        await ctx.runMutation(internal.inspections.deleteDamageResults, {
-          damageResultIds: deterministicDuplicateIds.map((id) => id as any)
-        });
-        await log(`  Removed ${deterministicDuplicateIds.length} deterministic duplicate finding(s) before AI deduplication.`);
-      }
-
-      const allFindings = deterministicDuplicateIds.length > 0
-        ? await ctx.runQuery(api.results.getInspectionDamageResults, { inspectionId })
-        : allFindingsBeforeCleanup;
-
-      if (allFindings.length > 1) {
-        const mediaIdMap = new Map<string, { name: string; label: string }>();
-        for (const item of sortedMedia) {
-          mediaIdMap.set(item._id.toString(), { name: item.fileName, label: item.viewLabel || "Close-up damage view" });
-        }
-
-        const formattedFindings = allFindings.map((f: any) => {
-          const mediaInfo = mediaIdMap.get(f.mediaId.toString());
-          return {
-            id: f._id.toString(),
-            image: mediaInfo ? `${mediaInfo.name} (${mediaInfo.label})` : "unknown",
-            part: f.part,
-            damageType: f.damageType,
-            severity: f.severity,
-            confidence: f.confidence,
-            description: f.description,
-            isFromPartScan: f.isFromPartScan,
-            box1000: f.box1000
-          };
-        });
-
-        const dedupPrompt = `
-          You are an expert vehicle damage claims auditor. Your task is to analyze a list of damage findings detected from different full-resolution images of the same vehicle and identify duplicates.
-
-          A duplicate is when the exact same physical damage (e.g. the same scratch, the same dent, or the same paint scuff) is reported multiple times because it was visible in multiple photos or overlapping part checks.
-
-          RULES FOR DUPLICATE GROUPING:
-          1. Check coordinates, descriptions, and parts. If two findings are on the same side of the vehicle (e.g. left side) and describe similar length/type/position of damage, group them.
-          2. CRITICAL: NEVER merge left-side damage with right-side damage, even if both are on the same part type. For example, "rear bumper left scuff" and "rear bumper right scuff" are SEPARATE physical damages on opposite sides of the vehicle — do NOT group them.
-          3. CRITICAL: NEVER merge different damage types on the same part. For example, a "hood panel_gap" and a "hood dent" are different physical issues even if they overlap spatially — do NOT group them.
-          4. For each group of duplicates, select the single "best" finding to KEEP, preferring higher confidence, clearer description, and more accurate box coverage.
-          5. List the IDs of all other findings in the group to DELETE.
-
-          Here is the list of findings:
-          ${JSON.stringify(formattedFindings, null, 2)}
-
-          Return exactly one JSON object:
-          {
-            "duplicateGroups": [
-              {
-                "reason": "Both findings describe the same 5cm scratch on the left front wheel arch panel visible from different views.",
-                "keepId": "id_of_best_finding",
-                "deleteIds": ["id_of_duplicate_1", "id_of_duplicate_2"]
-              }
-            ]
-          }
-          If there are no duplicates, return {"duplicateGroups": []}.
-        `.trim();
-
-        const dedupRes = await callGemini(apiKey, model, "text/plain", "", dedupPrompt);
-        const groups = dedupRes?.duplicateGroups || [];
-        const idsToDeleteSet = new Set<string>();
-
-        for (const g of groups) {
-          if (g.deleteIds && Array.isArray(g.deleteIds)) {
-            for (const id of g.deleteIds) {
-              if (id && id !== g.keepId) {
-                idsToDeleteSet.add(id);
-              }
-            }
-            await log(`  AI merged duplicate group: Keeping ${g.keepId}, deleting duplicates [${g.deleteIds.join(", ")}]. Reason: ${g.reason}`);
-          }
-        }
-
-        const idsToDelete = Array.from(idsToDeleteSet).map((id) => id as any);
-        if (idsToDelete.length > 0) {
-          await ctx.runMutation(internal.inspections.deleteDamageResults, { damageResultIds: idsToDelete });
-          await log(`  Successfully deleted ${idsToDelete.length} duplicate findings from database.`);
-        } else {
-          await log("  No duplicate findings were identified by the AI pass.");
-        }
-      } else {
-        await log("  Skipping deduplication pass (1 or fewer findings).");
-      }
-
+      await log("Stage 3/4: Findings already audited and deduplicated in Stage 3. Skipping additional deduplication.");
       await updateProgress("analyzing", 95, "Running final integrity checks...");
       await log("Stage 4/4: Verifying same vehicle consistency and image authenticity...");
 
@@ -397,7 +366,7 @@ export const runAnalysisStage5And6 = internalAction({
 
       const authPrompt = `
         You are a claim fraud specialist. Review these photos visually. Is there any evidence of image manipulation, photoshop, or synthetic damage being pasted in?
-        
+
         Findings: ${JSON.stringify(finalFindings.map((f: any) => ({ type: f.damageType, desc: f.description, confidence: f.confidence })))}
 
         Return exactly one JSON object:
@@ -435,7 +404,7 @@ export const runAnalysisStage5And6 = internalAction({
 
       // --- COMPLETE ANALYSIS ---
       const postChecksFindings = await ctx.runQuery(api.results.getInspectionDamageResults, { inspectionId });
-      
+
       await ctx.runMutation(internal.shared.updateInspectionProgressInternal, {
         inspectionId,
         status: "done",
@@ -504,7 +473,7 @@ async function simulateMockAnalysis(
 
   await wait(1500);
   await updateProgress("analyzing", 65, "Inspecting each image with systematic anomaly detection...");
-  
+
   // Inject some mock damage findings
   const mockDamages = [
     {
@@ -696,49 +665,81 @@ function buildGroupAnalysisPrompt(group: AnalysisGroup, passNumber: number, prio
     - A fender can have BOTH a dent AND scratches — report each separately.
     Always report each distinct damage type as its own finding even if they overlap spatially on the same part.
 
-    DAMAGE TAXONOMY AND LABEL MAPPING:
-    1. Metal Damage - painted/metal body parts such as bumpers, bonnet/hood, doors, fenders, quarter panels, roof, boot/trunk, side panels:
-       - scratch: light scratch, deep scratch, paint scratch, paint scuff, scrape, abrasion.
-       - dent: small dent, large dent, shallow dent, sharp dent, crease dent, multiple dents, surface waviness/creases from impact.
-       - tear: metal tear, bumper tear, split, cut, hole, puncture.
-       - structural_damage: crushed panel, bent panel, deformed bumper, broken body part, collapsed section, severe impact damage.
-    2. Glass Damage - windshield, windows, rear glass, sunroof glass, headlights, tail lights, fog lights:
-       - glass_crack: linear crack, long crack, edge crack, stress crack, star crack.
-       - glass_chip: stone chip, small chip, bullseye chip, pit mark, half-moon chip.
-       - spider_web_fracture: spider crack, radial crack, web crack, shattered glass pattern.
-       - broken_glass: broken headlight, broken tail light, shattered window, damaged windshield.
-    3. Miscellaneous Damage - alignment, fitting, and part-position related damage:
-       - panel_gap: bumper gap, door gap, hood gap, boot/trunk gap, fender gap.
-       - part_dislocation: bumper dislocation, headlight dislocation, grille dislocation, mirror displacement, number plate displacement.
-       - misalignment: bumper misalignment, door misalignment, hood misalignment, trunk misalignment, fender misalignment.
-       - missing_part: loose bumper, missing trim, missing reflector, missing mirror cover, missing grille piece.
-    4. Vehicle Anomalies - non-standard conditions visible in photos:
-       - wheel_anomaly: mismatched wheel types on same vehicle (e.g. alloy on one side and steel on another), wrong wheel size, space-saver spare on driving position, damaged alloy rim.
-       - obstruction: heavy dirt, mud, or grime masking potential damage underneath; area requires cleaning for proper inspection.
-       - emblem_damage: missing brand badge, damaged logo, incorrect brand emblem, broken nameplate, missing model badge on grille, trunk, or fenders.
+    CROSS-IMAGE DEDUPLICATION (CRITICAL):
+    When multiple images show the SAME physical part of the vehicle from different angles:
+    - Report each unique physical damage ONLY ONCE, in the SINGLE IMAGE where it is MOST CLEARLY VISIBLE.
+    - Do NOT report the same bumper dent in both the "front view" image AND the "front right view" image.
+    - Before adding a damage finding to an image, check: "Have I already reported this exact physical damage in another image?" If yes, SKIP it.
+    - The rule is: ONE physical damage = ONE finding in ONE image. Choose the image with the best angle and clarity for that damage.
+
+    DAMAGE TAXONOMY AND LABEL MAPPING (STRICT — ONLY 3 TYPES ALLOWED):
+    You MUST classify every damage into EXACTLY one of these 3 labels. No other labels are allowed:
+    1. scratch — any linear surface mark, paint scuff, scrape, abrasion, paint scratch, key scratch, brush mark, paint chip, or surface mark that removes or displaces paint. This is surface-level only with no deformation.
+    2. dent — any physical deformation, depression, dip, crease, push-in, buckle, or surface waviness that changes the panel shape. Includes shallow dents, deep dents, crease dents, and impact deformations.
+    3. damaged — ALL other damage types: tears, cracks, broken parts, missing parts, structural damage, crushed panels, broken glass, broken lights, detached parts, missing trim, rust, holes, punctures, or any damage that doesn't fit scratch or dent.
+
+    STRICT GUARDRAILS:
+    - Do NOT use panel_gap, misalignment, part_dislocation, structural_damage, tear, missing_part, emblem_damage, glass_crack, broken_glass, spider_web_fracture, glass_chip, wheel_anomaly, obstruction, rust, or paint_peel as damageType values.
+    - If something looks like a panel gap or misalignment, classify it as "damaged" ONLY if it is actual physical damage. Normal manufacturing panel gaps and factory trim lines are NOT damage — do NOT report them.
+    - If a bumper is hanging off or a headlight is broken, classify as "damaged".
+    - If a badge or emblem is missing, classify as "damaged".
 
     LOOP 1 - IMAGE AND PART DESCRIPTION:
     For each image, describe the visible vehicle view and list every visible part.
     Mention coverage quality: fully visible, partially visible, steep angle, obscured, or not inspectable.
-    Specifically note: brand badges/emblems/logos on grille, trunk, and fenders. Note all visible wheel types (alloy, steel, spare).
 
     LOOP 2 - SYSTEMATIC ANOMALY DETECTION:
     For each visible part in each image:
-    - Inspect broad area first for missing parts, deformation, broken lamps/glass, panel gaps, structural damage, misalignment, part dislocation, and major dents.
-    - Inspect medium areas using a 3x3 mental grid.
-    - Inspect smaller high-risk areas using 5x5 to 10x10 mental grids for scratches, paint scuffs, glass chips, and hairline cracks.
-    - Check edges, corners, wheel arches, rocker panels, bumpers, lamps, mirrors, panel transitions, and trim lines carefully.
-    - Check brand badges and emblems: are they present, correctly oriented, and undamaged? If a badge is missing, cracked, or shows the wrong brand, report as emblem_damage.
-    - Check wheels: compare wheel types across all images. If one wheel is alloy and another is steel on the same vehicle, report as wheel_anomaly.
-    - Check for heavy dirt/grime that could be concealing damage underneath — report as obstruction if significant.
+    - Inspect the panel for DENTS: look for surface deformations, buckles, creases, light reflection distortions, and surface waviness.
+    - Inspect the panel for SCRATCHES: look for linear paint marks, scuffs, and surface abrasions — BUT verify they are NOT reflections, panel seams, trim lines, or dirt (see scratch false positive rules).
+    - Inspect for other DAMAGE: torn parts, broken glass/lights, missing components, crushed panels, holes, cracks.
+    - Check edges, corners, bumpers, and high-risk zones carefully.
     - Return boxes in original full-image 0-1000 coordinates.
     - Boxes must cover the full visible damaged/anomalous area, not only a center point.
+
+    BOUNDING BOX PRECISION RULES (CRITICAL):
+    - Each bounding box MUST tightly wrap ONLY the visually damaged area with a small margin (20-50 units).
+    - Do NOT extend the box to cover the entire panel or component — only the damage itself.
+    - For a scratch, the box should be a narrow rectangle covering just the scratch line plus small margin.
+    - For a dent, the box should cover the visible deformation boundary, NOT the whole panel.
+    - If two damages are on the same panel but separated by more than 80 units, they MUST have separate non-overlapping boxes.
+    - NEVER make a box larger than 350x350 units unless the damage genuinely spans that area.
+    - Prefer TIGHT boxes over generous boxes. A box that is too large is worse than a box that is slightly too small.
+
+    SCRATCH FALSE POSITIVE PREVENTION (CRITICAL):
+    Before reporting ANY scratch, you MUST mentally zoom into that specific area at high resolution and confirm:
+    1. Is this an actual paint scratch/scuff, or is it one of these FALSE POSITIVES?
+       - Body panel SEAM lines or panel EDGES — these are manufacturing features, NOT scratches.
+       - TRIM lines, chrome strips, or rubber molding borders — NOT scratches.
+       - REFLECTIONS of nearby objects (poles, fences, buildings, other cars) on the paint — NOT scratches.
+       - SHADOW edges from surrounding objects or the car's own body lines — NOT scratches.
+       - DIRT, dust, water streaks, or dried mud — NOT scratches unless paint is clearly damaged underneath.
+       - JPEG compression artifacts or image noise — NOT scratches.
+       - Door handle edges, fuel filler edges, or antenna lines — NOT scratches.
+    2. A real scratch has a DISTINCT linear mark that INTERRUPTS the paint surface with visible paint removal, color change, or surface texture change.
+    3. If you are not at least 70% confident that it is a real scratch and not a reflection/seam/edge, DO NOT report it.
+    4. When in doubt, err on the side of NOT reporting a scratch. False positives are worse than missed scratches.
+
+    DENT DETECTION TECHNIQUE (IMPORTANT):
+    Dents are often subtle and easy to miss. Use these visual cues:
+    1. LIGHT REFLECTION DISTORTION — look for warped, bent, or interrupted reflections on the body panels. A smooth panel reflects light evenly; a dent creates a distorted reflection.
+    2. SURFACE WAVINESS — look for subtle undulations or ripples in the body panels, especially when viewed at shallow angles.
+    3. SHADOW PATTERNS — dents create small shadow pockets or bright spots that differ from the surrounding surface.
+    4. PAINT COLOR VARIATION — dents often cause subtle color shifts due to the angle change of the paint surface.
+    5. HIGH-RISK DENT AREAS — doors, front/rear quarter panels, hood, trunk lid, roof, and pillars. Pay extra attention to these.
+    6. Look carefully at EACH body panel individually. Scan slowly across the surface looking for ANY irregularity in the reflection pattern.
 
     LEFT vs RIGHT SIDE RULE:
     Damage on the left side and damage on the right side of the same part are SEPARATE findings. Always include the side (left/right/center) in the part name when the damage is on a specific side.
 
     Return exactly one JSON object:
     ${analysisSchemaExample()}
+
+    SMALL/FINE DAMAGE DETECTION (MANDATORY):
+    - Scan every panel for hairline scratches, minor scuffs, and light paint marks — but ONLY report them if they pass the scratch false positive checks above.
+    - Pay special attention to: bumper corners, door edges, fender lips, mirror housings, rocker panels, wheel arch edges, fuel filler door area, and trunk/tailgate edges.
+    - For each image, confirm you have checked ALL edges, transitions, and high-risk zones before finishing.
+    - Number each damage finding sequentially within each image starting from 1 using the damageIndex field.
     ${prior}
   `.trim();
 }
@@ -761,12 +762,25 @@ async function reconcileGroupAnalyses(
     Rules:
     - Keep imageId values exactly as provided.
     - Do not invent new visual findings. Use only findings supported by the grouped analyses.
-    - Merge duplicate damages that describe the same physical issue across front/left/right/rear/close-up groups.
-    - Prefer the clearest description, highest confidence, and box that best covers the full visible damage area.
-    - Preserve part coverage for each image so the report can mention parts identified and their source images.
-    - If the same image appears in multiple groups, produce only one final entry for that image.
-    - damageType must be exactly one value from this first-version label list: ${DAMAGE_LABELS.join(", ")}.
-    - Map any subtype wording from the grouped analyses to the closest first-version label. For example, paint scuff maps to scratch, crease dent maps to dent, windshield crack maps to glass_crack, broken headlight maps to broken_glass, and bumper gap maps to panel_gap.
+    - damageType must be exactly one value from this label list: ${DAMAGE_LABELS.join(", ")}.
+    - Map any subtype wording to these 3 labels: paint scuff/scrape/abrasion → scratch, crease/buckle/deformation → dent, tear/crack/broken/missing/structural → damaged.
+    - If a finding has a damageType like panel_gap, misalignment, part_dislocation, structural_damage, tear, missing_part — remap it to "damaged".
+    - Normal factory panel gaps and trim lines are NOT damage — remove those findings entirely.
+
+    CROSS-IMAGE DEDUPLICATION (MOST IMPORTANT RULE):
+    - When the SAME physical damage is reported in multiple images (e.g., "front bumper dent" found in both "front view" and "front right view"), you MUST keep it ONLY in the ONE image where it is most clearly visible.
+    - DELETE the duplicate findings from all other images. Do NOT repeat the same physical damage across multiple images.
+    - Two findings are duplicates if they describe the same part, same damage type, and the same physical location on the vehicle — even if the box coordinates differ between images.
+    - Example: "front bumper right side · scratch" in image_01 AND "front bumper right side · scratch" in image_03 = DUPLICATE. Keep only the one with the better view.
+
+    FALSE POSITIVE SCRATCH REMOVAL:
+    - Remove any scratch findings that describe panel seams, trim lines, reflections, shadows, dirt, or manufacturing edges.
+    - A real scratch must show visible paint removal, color change, or surface texture disruption.
+    - If a scratch description mentions "faint", "possible", "potential", or "might be" — remove it unless the confidence is above 0.7.
+
+    DENT VERIFICATION:
+    - Keep all dent findings. Dents are physical deformations that are hard to misidentify.
+    - If a dent was found in the grouped analyses, preserve it in the final result.
 
     Media context:
     ${JSON.stringify(mediaContext, null, 2)}
@@ -802,13 +816,15 @@ async function persistAnalysisResult(
     const imageAnalysis = analysisByImageId.get(payload.imageId) || {};
     const parts = Array.isArray(imageAnalysis.parts) ? imageAnalysis.parts : [];
     const mappedParts: Array<{ partName: string; box1000: Box1000; coveredParts?: string[] }> = [];
+    const cropBox = payload.media.cropBox1000;
 
     for (const part of parts) {
       const box = sanitizeBox(part?.box1000);
       if (!box || !part?.partName) continue;
+      const mappedBox = mapBoxBack(box, cropBox);
       mappedParts.push({
         partName: String(part.partName),
-        box1000: expandBoxWithMin(box, 0.08, 180, 160),
+        box1000: expandBoxWithMin(mappedBox, 0.05, 120, 100),
         coveredParts: Array.isArray(part.coveredParts)
           ? part.coveredParts.filter((p: any) => typeof p === "string")
           : []
@@ -831,11 +847,20 @@ async function persistAnalysisResult(
     }
 
     const damages = Array.isArray(imageAnalysis.damages) ? imageAnalysis.damages : [];
+    const damageAnnotations: DamageAnnotation[] = [];
     for (const d of damages) {
       const box = sanitizeBox(d?.box1000);
       if (!box) continue;
+      const mappedBox = mapBoxBack(box, cropBox);
       const severity = sanitizeSeverity(d?.severity);
       const damageType = String(d?.damageType || "other");
+      const expandedBox = expandDamageBox(mappedBox);
+
+      let intensityScore = 5;
+      if (severity === "minor") intensityScore = 2;
+      else if (severity === "moderate") intensityScore = 5;
+      else if (severity === "severe") intensityScore = 9;
+
       await ctx.runMutation(internal.inspections.writeDamageResult, {
         inspectionId,
         mediaId: payload.media._id,
@@ -844,14 +869,274 @@ async function persistAnalysisResult(
         severity,
         confidence: clampConfidence(d?.confidence),
         description: String(d?.description || `Anomaly found on ${d?.part || "vehicle"}.`),
-        box1000: expandDamageBox(box),
+        box1000: expandedBox,
         isFromPartScan: false,
-        recommendation: getRecommendation(damageType, severity)
+        recommendation: getRecommendation(damageType, severity),
+        source: "vision_model",
+        intensityScore
       });
+      damageAnnotations.push({ box1000: expandedBox, severity, damageType, index: damageAnnotations.length + 1 });
     }
 
+    await storeAnnotatedDamageImage(ctx, payload, damageAnnotations, log);
     await log(`Analyzed "${payload.media.fileName}": ${mappedParts.length} parts described, ${damages.length} reconciled finding(s).`);
   }
+}
+
+async function storeAnnotatedDamageImage(
+  ctx: any,
+  payload: ImagePayload,
+  damages: DamageAnnotation[],
+  log: (msg: string) => Promise<void>
+) {
+  if (damages.length === 0) return;
+
+  try {
+    const sourceBuffer = Buffer.from(payload.originalBase64 || payload.base64, "base64");
+    const decoded = decodeJpeg(new Uint8Array(sourceBuffer), { useTArray: true, maxMemoryUsageInMB: 256 });
+    const data = new Uint8Array(decoded.data);
+
+    for (const damage of damages) {
+      const color = getSeverityColor(damage.severity);
+      drawBox1000(data, decoded.width, decoded.height, damage.box1000, color);
+      const label = `#${damage.index} ${formatDamageLabel(damage.damageType)}`;
+      drawLabel(data, decoded.width, decoded.height, damage.box1000, label, color);
+    }
+
+    const encoded = encodeJpeg({ data, width: decoded.width, height: decoded.height }, 90);
+    const blob = new Blob([Buffer.from(encoded.data)], { type: "image/jpeg" });
+    const annotatedStorageId = await ctx.storage.store(blob);
+
+    await ctx.runMutation(internal.media.updateMediaAnnotatedStorageId, {
+      mediaId: payload.media._id,
+      annotatedStorageId
+    });
+  } catch (err: any) {
+    console.warn(`Could not create annotated image for ${payload.media.fileName}:`, err);
+    await log(`Annotation image skipped for "${payload.media.fileName}": ${err.message || String(err)}`);
+  }
+}
+
+function formatDamageLabel(damageType: string): string {
+  return String(damageType || "damage").replace(/_/g, " ");
+}
+
+function cropImageBase64(base64: string, cropBox: Box1000): string {
+  try {
+    const input = Buffer.from(base64, "base64");
+    const decoded = decodeJpeg(new Uint8Array(input), { useTArray: true, maxMemoryUsageInMB: 256 });
+    
+    // Map 0-1000 coordinates to actual pixel box
+    const left = Math.max(0, Math.min(decoded.width - 1, Math.round((cropBox.left / 1000) * decoded.width)));
+    const top = Math.max(0, Math.min(decoded.height - 1, Math.round((cropBox.top / 1000) * decoded.height)));
+    const right = Math.max(0, Math.min(decoded.width - 1, Math.round((cropBox.right / 1000) * decoded.width)));
+    const bottom = Math.max(0, Math.min(decoded.height - 1, Math.round((cropBox.bottom / 1000) * decoded.height)));
+
+    let boxW = right - left;
+    let boxH = bottom - top;
+    if (boxW <= 0) boxW = 1;
+    if (boxH <= 0) boxH = 1;
+
+    const output = new Uint8Array(boxW * boxH * 4);
+    for (let y = 0; y < boxH; y += 1) {
+      const sourceStart = ((top + y) * decoded.width + left) * 4;
+      const targetStart = y * boxW * 4;
+      output.set(decoded.data.subarray(sourceStart, sourceStart + boxW * 4), targetStart);
+    }
+
+    const encoded = encodeJpeg({ data: output, width: boxW, height: boxH }, 90).data;
+    return Buffer.from(encoded).toString("base64");
+  } catch (err) {
+    console.error("Failed to crop image base64:", err);
+    return base64; // Fallback to original
+  }
+}
+
+function mapBoxBack(box: Box1000, cropBox?: Box1000): Box1000 {
+  if (!cropBox) return box;
+  const L = cropBox.left;
+  const T = cropBox.top;
+  const R = cropBox.right;
+  const B = cropBox.bottom;
+
+  return {
+    left: Math.max(0, Math.min(1000, Math.round(L + (box.left / 1000) * (R - L)))),
+    top: Math.max(0, Math.min(1000, Math.round(T + (box.top / 1000) * (B - T)))),
+    right: Math.max(0, Math.min(1000, Math.round(L + (box.right / 1000) * (R - L)))),
+    bottom: Math.max(0, Math.min(1000, Math.round(T + (box.bottom / 1000) * (B - T))))
+  };
+}
+
+// Simple 5x7 bitmap font for digits and common ASCII (uppercase + lowercase)
+const GLYPH_W = 5;
+const GLYPH_H = 7;
+const GLYPHS: Record<string, number[]> = {
+  "#": [0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b00000, 0b00000],
+  " ": [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000],
+  "0": [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+  "1": [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+  "2": [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
+  "3": [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110],
+  "4": [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+  "5": [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+  "6": [0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110],
+  "7": [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+  "8": [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+  "9": [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+  "a": [0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111],
+  "b": [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110],
+  "c": [0b00000, 0b00000, 0b01110, 0b10000, 0b10000, 0b10001, 0b01110],
+  "d": [0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b10001, 0b01111],
+  "e": [0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110],
+  "f": [0b00110, 0b01000, 0b11110, 0b01000, 0b01000, 0b01000, 0b01000],
+  "g": [0b00000, 0b01111, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+  "h": [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+  "i": [0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+  "k": [0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+  "l": [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+  "m": [0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10001, 0b10001],
+  "n": [0b00000, 0b00000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+  "o": [0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+  "p": [0b00000, 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000],
+  "r": [0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000],
+  "s": [0b00000, 0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110],
+  "t": [0b01000, 0b01000, 0b11110, 0b01000, 0b01000, 0b01001, 0b00110],
+  "u": [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+  "w": [0b00000, 0b00000, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010],
+  "x": [0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001],
+  "y": [0b00000, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+  "_": [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
+};
+
+function drawLabel(
+  data: Uint8Array,
+  imageWidth: number,
+  imageHeight: number,
+  box: Box1000,
+  label: string,
+  color: [number, number, number]
+) {
+  const scale = Math.max(1, Math.round(Math.min(imageWidth, imageHeight) / 600));
+  const charW = GLYPH_W * scale + scale;
+  const charH = GLYPH_H * scale;
+  const padX = scale * 3;
+  const padY = scale * 2;
+  const maxLabelChars = 18;
+  const truncatedLabel = label.length > maxLabelChars ? label.slice(0, maxLabelChars) : label;
+
+  const labelWidth = truncatedLabel.length * charW + padX * 2;
+  const labelHeight = charH + padY * 2;
+
+  const boxLeft = Math.max(0, Math.min(imageWidth - 1, Math.round((box.left / 1000) * imageWidth)));
+  const boxTop = Math.max(0, Math.min(imageHeight - 1, Math.round((box.top / 1000) * imageHeight)));
+
+  // Position label just above the box; if no room, put it inside at the top
+  let labelX = boxLeft;
+  let labelY = boxTop - labelHeight - 1;
+  if (labelY < 0) labelY = boxTop + 1;
+  if (labelX + labelWidth > imageWidth) labelX = Math.max(0, imageWidth - labelWidth);
+
+  // Draw filled background rectangle
+  for (let dy = 0; dy < labelHeight && labelY + dy < imageHeight; dy++) {
+    for (let dx = 0; dx < labelWidth && labelX + dx < imageWidth; dx++) {
+      const px = labelX + dx;
+      const py = labelY + dy;
+      if (px >= 0 && py >= 0) {
+        setPixel(data, imageWidth, px, py, color);
+      }
+    }
+  }
+
+  // Draw text in white
+  const textColor: [number, number, number] = [255, 255, 255];
+  let cursorX = labelX + padX;
+  const textY = labelY + padY;
+  for (const ch of truncatedLabel) {
+    const glyph = GLYPHS[ch.toLowerCase()] || GLYPHS[" "];
+    if (glyph) {
+      for (let row = 0; row < GLYPH_H; row++) {
+        const bits = glyph[row];
+        for (let col = 0; col < GLYPH_W; col++) {
+          if ((bits >> (GLYPH_W - 1 - col)) & 1) {
+            for (let sy = 0; sy < scale; sy++) {
+              for (let sx = 0; sx < scale; sx++) {
+                const px = cursorX + col * scale + sx;
+                const py = textY + row * scale + sy;
+                if (px >= 0 && px < imageWidth && py >= 0 && py < imageHeight) {
+                  setPixel(data, imageWidth, px, py, textColor);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    cursorX += charW;
+  }
+}
+
+function drawBox1000(data: Uint8Array, width: number, height: number, box: Box1000, color: [number, number, number]) {
+  const left = Math.max(0, Math.min(width - 1, Math.round((box.left / 1000) * width)));
+  const top = Math.max(0, Math.min(height - 1, Math.round((box.top / 1000) * height)));
+  const right = Math.max(0, Math.min(width - 1, Math.round((box.right / 1000) * width)));
+  const bottom = Math.max(0, Math.min(height - 1, Math.round((box.bottom / 1000) * height)));
+  if (right <= left || bottom <= top) return;
+
+  const thickness = Math.max(3, Math.round(Math.min(width, height) * 0.005));
+  for (let offset = 0; offset < thickness; offset += 1) {
+    drawHorizontalLine(data, width, height, left, right, top + offset, color);
+    drawHorizontalLine(data, width, height, left, right, bottom - offset, color);
+    drawVerticalLine(data, width, height, left + offset, top, bottom, color);
+    drawVerticalLine(data, width, height, right - offset, top, bottom, color);
+  }
+}
+
+function drawHorizontalLine(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  x1: number,
+  x2: number,
+  y: number,
+  color: [number, number, number]
+) {
+  if (y < 0 || y >= height) return;
+  const start = Math.max(0, Math.min(x1, x2));
+  const end = Math.min(width - 1, Math.max(x1, x2));
+  for (let x = start; x <= end; x += 1) {
+    setPixel(data, width, x, y, color);
+  }
+}
+
+function drawVerticalLine(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  x: number,
+  y1: number,
+  y2: number,
+  color: [number, number, number]
+) {
+  if (x < 0 || x >= width) return;
+  const start = Math.max(0, Math.min(y1, y2));
+  const end = Math.min(height - 1, Math.max(y1, y2));
+  for (let y = start; y <= end; y += 1) {
+    setPixel(data, width, x, y, color);
+  }
+}
+
+function setPixel(data: Uint8Array, width: number, x: number, y: number, color: [number, number, number]) {
+  const index = (y * width + x) * 4;
+  data[index] = color[0];
+  data[index + 1] = color[1];
+  data[index + 2] = color[2];
+  data[index + 3] = 255;
+}
+
+function getSeverityColor(severity: "minor" | "moderate" | "severe"): [number, number, number] {
+  if (severity === "severe") return [229, 62, 62];
+  if (severity === "moderate") return [221, 107, 32];
+  return [49, 151, 149];
 }
 
 function combineGroupAnalyses(groupResults: GroupAnalysisResult[]): any {
@@ -911,6 +1196,7 @@ function analysisSchemaExample(): string {
       ],
       "damages": [
         {
+          "damageIndex": 1,
           "part": "front bumper left half",
           "damageType": "${DAMAGE_LABELS.join("|")}",
           "severity": "minor|moderate|severe",
@@ -999,40 +1285,40 @@ function expandDamageBox(box: Box1000): Box1000 {
   const aspectRatio = longSide / shortSide;
   const isLinearMark = aspectRatio >= 3;
 
-  let paddingRatio = 0.16;
+  // Tighter padding ratios — boxes should wrap the damage closely
+  let paddingRatio = 0.06;
   let minWidth = width;
   let minHeight = height;
 
   if (area < 2500) {
-    paddingRatio = 0.55;
+    // Small damage: modest expansion, keep it compact
+    paddingRatio = 0.15;
     if (isLinearMark) {
-      const minLong = Math.max(90, longSide * 1.25);
-      const minShort = 48;
+      const minLong = Math.max(55, longSide * 1.1);
+      const minShort = 28;
       minWidth = width >= height ? minLong : minShort;
       minHeight = width >= height ? minShort : minLong;
     } else {
-      minWidth = 78;
-      minHeight = 78;
+      minWidth = 40;
+      minHeight = 40;
     }
   } else if (area < 10000) {
-    paddingRatio = 0.35;
+    // Medium damage: small expansion
+    paddingRatio = 0.10;
     if (isLinearMark) {
-      const minLong = Math.max(110, longSide * 1.18);
-      const minShort = 56;
+      const minLong = Math.max(70, longSide * 1.08);
+      const minShort = 35;
       minWidth = width >= height ? minLong : minShort;
       minHeight = width >= height ? minShort : minLong;
     } else {
-      minWidth = Math.max(width, 92);
-      minHeight = Math.max(height, 92);
+      minWidth = Math.max(width, 50);
+      minHeight = Math.max(height, 50);
     }
   } else if (area < 35000) {
-    paddingRatio = 0.24;
-    minWidth = Math.max(width, isLinearMark ? 120 : 100);
-    minHeight = Math.max(height, isLinearMark ? 60 : 100);
-    if (height > width && isLinearMark) {
-      minWidth = Math.max(width, 60);
-      minHeight = Math.max(height, 120);
-    }
+    // Large damage: minimal expansion, box is already large enough
+    paddingRatio = 0.06;
+    minWidth = width;
+    minHeight = height;
   }
 
   return expandBoxWithMin(box, paddingRatio, minWidth, minHeight);
@@ -1078,8 +1364,14 @@ function areLikelyDuplicateFindings(a: any, b: any): boolean {
   // Never merge different damage types on the same part (co-located damage)
   if (typeA !== typeB) return false;
 
+  // SAME IMAGE: deduplicate by box overlap or proximity
   if (sameMedia && relatedType && (overlap >= 0.3 || centersClose)) return true;
-  return relatedPart && relatedType && overlap >= 0.45;
+
+  // CROSS-IMAGE: same part + same type = likely the same physical damage seen from different angles
+  // (boxes from different images have incomparable coordinates, so we match by part name instead)
+  if (!sameMedia && relatedPart && relatedType) return true;
+
+  return false;
 }
 
 function scoreFindingForDedup(finding: any): number {
@@ -1425,13 +1717,13 @@ async function callGeminiWithParts(
       .map((p: any) => p.text)
       .join("\n")
       .trim();
-    
+
     if (!text) {
       console.error("Gemini API returned empty text. Full response:", JSON.stringify(result));
       const finishReason = candidate?.finishReason || "unknown";
       throw new Error(`Gemini API returned empty text. finishReason: ${finishReason}. fullResponse: ${JSON.stringify(result)}`);
     }
-    
+
     try {
       return dirtyJsonParse(text);
     } catch (err: any) {

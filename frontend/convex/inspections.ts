@@ -239,6 +239,19 @@ export const updateClassificationStatusInternal = internalMutation({
 });
 
 async function clearInspectionResults(ctx: any, inspectionId: any) {
+  const media = await ctx.db
+    .query("inspectionMedia")
+    .withIndex("by_inspectionId", (q: any) => q.eq("inspectionId", inspectionId))
+    .collect();
+  for (const item of media) {
+    if (item.annotatedStorageId) {
+      try {
+        await ctx.storage.delete(item.annotatedStorageId);
+      } catch {}
+      await ctx.db.patch(item._id, { annotatedStorageId: undefined });
+    }
+  }
+
   const damages = await ctx.db
     .query("damageResults")
     .withIndex("by_inspectionId", (q: any) => q.eq("inspectionId", inspectionId))
@@ -297,7 +310,9 @@ export const writeDamageResult = internalMutation({
     }),
     isFromPartScan: v.boolean(),
     partCropStorageId: v.optional(v.id("_storage")),
-    recommendation: v.string()
+    recommendation: v.string(),
+    source: v.optional(v.union(v.literal("ml_model"), v.literal("vision_model"))),
+    intensityScore: v.optional(v.number())
   },
   handler: async (ctx, args) => {
     await ctx.db.insert("damageResults", {
@@ -411,6 +426,18 @@ export const completeInspection = internalMutation({
   }
 });
 
+export const updateReportSummary = internalMutation({
+  args: {
+    inspectionId: v.id("inspections"),
+    reportSummary: v.string()
+  },
+  handler: async (ctx, { inspectionId, reportSummary }) => {
+    await ctx.db.patch(inspectionId, {
+      reportSummary
+    });
+  }
+});
+
 export const resetClassificationStatus = mutation({
   args: { inspectionId: v.id("inspections") },
   handler: async (ctx, { inspectionId }) => {
@@ -418,7 +445,7 @@ export const resetClassificationStatus = mutation({
       classificationStatus: "pending",
       progressMessage: "Ready to upload photos."
     });
-    
+
     // Clear viewLabel and visiblePartDescriptions on all media
     const media = await ctx.db
       .query("inspectionMedia")
@@ -433,6 +460,5 @@ export const resetClassificationStatus = mutation({
     }
   }
 });
-
 
 
